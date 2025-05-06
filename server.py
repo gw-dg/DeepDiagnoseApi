@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 import pandas as pd
 import numpy as np
 import pickle
@@ -8,10 +9,16 @@ import re
 from sklearn.preprocessing import LabelEncoder
 from dotenv import load_dotenv
 import os
+from groq import Groq
 
 load_dotenv()  
 
 origins = os.getenv("ALLOWED_ORIGINS", "")
+
+groq = Groq(
+    api_key=os.environ.get("GROQ_API_KEY"),
+)
+
 
 # Initialize FastAPI
 app = FastAPI(title="Deep Diagnose")
@@ -60,6 +67,10 @@ md = pd.read_csv("datasets/medications.csv")
 # Define Request Model
 class SymptomInput(BaseModel):
     symptoms: list[str]  
+
+class ChatRequest(BaseModel):
+    message: str
+
 
 @app.get("/")
 def root():
@@ -126,4 +137,60 @@ def predict_disease(user_input: SymptomInput):
 
     except Exception as e:
         print("Error occurred:", str(e)) 
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/chat")
+async def chat_endpoint(chat_request: ChatRequest):
+    """
+    Sends a chat message to Groq API and streams back the response.
+    """
+    try:
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a helpful, knowledgeable, and cautious AI doctor named DeepDiagnose. "
+                    "Your goal is to assist users by discussing their symptoms, suggesting possible conditions based on their description, "
+                    "and advising them to seek professional medical care when necessary. "
+                    "You must not make a definitive diagnosis or prescribe treatment. "
+                    "Always remind the user that your advice does not replace a visit to a licensed healthcare professional. "
+                    "Be clear, empathetic, and use simple language unless the user asks for detailed medical explanations."
+                ),
+            },
+            {
+                "role": "user",
+                "content": chat_request.message,
+            },
+        ]
+
+        chat_completion = groq.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=messages,
+            temperature=1,
+            max_tokens=1024,
+            top_p=1,
+            stream=True, 
+        )
+
+        # Improved streaming generator function
+        async def event_generator():
+            for chunk in chat_completion:
+                if chunk.choices and chunk.choices[0].delta:
+                    content = chunk.choices[0].delta.content
+                    if content:
+                        # Send properly formatted SSE message
+                        yield f"data: {content}\n\n"
+
+        return StreamingResponse(
+            event_generator(), 
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "Content-Type": "text/event-stream"
+            }
+        )
+
+    except Exception as e:
+        print(f"Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
